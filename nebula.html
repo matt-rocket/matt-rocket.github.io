@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Nebula Relay</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--c:#5ef2ff;--m:#ff4fd8;--g:#ffd36b}
+*{margin:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden;background:#04030c;color:#e8f6ff;font-family:-apple-system,"SF Pro Display","Helvetica Neue",sans-serif;user-select:none;-webkit-user-select:none}
+canvas{position:fixed;inset:0;width:100%;height:100%}
+#fg{cursor:pointer}
+#hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;padding:22px 34px;font:500 13px "SF Mono",ui-monospace,monospace;letter-spacing:.14em;pointer-events:none;color:#9fd8ff;text-shadow:0 0 12px #5ef2ff88}
+#hud b{display:block;font:700 32px -apple-system,"SF Pro Display",sans-serif;letter-spacing:.02em;color:#fff;margin-top:2px}
+#hud div:last-child{text-align:right}
+#ov{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;background:radial-gradient(#04030c66,#04030ce6);transition:opacity .5s}
+#ov.h{opacity:0;pointer-events:none}
+h1{font-weight:800;font-size:clamp(44px,9vw,110px);letter-spacing:.14em;line-height:1;background:linear-gradient(90deg,var(--c),var(--m) 60%,var(--g));-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 0 28px #5ef2ff66)}
+#ov p{max-width:460px;margin:22px 0 30px;line-height:1.65;color:#b9cdea}
+button{font:700 16px -apple-system,sans-serif;letter-spacing:.08em;color:#04030c;background:linear-gradient(90deg,var(--c),var(--g));border:0;border-radius:999px;padding:15px 44px;cursor:pointer;box-shadow:0 0 34px #5ef2ff88;transition:transform .15s,box-shadow .15s}
+button:hover{transform:scale(1.06);box-shadow:0 0 54px #ff4fd8aa}
+button:focus-visible{outline:2px solid #fff;outline-offset:4px}
+</style></head><body>
+<canvas id="bg"></canvas><canvas id="fg"></canvas>
+<div id="hud"><div>Score<b id="sc">0</b></div><div>Sector<b id="lv">1</b></div><div>Hull<b id="hp">◆◆◆</b></div></div>
+<div id="ov"><h1>NEBULA RELAY</h1>
+<p id="tx">Plasma is about to flood the grid. Click tiles to rotate the conduits and carve a route from the source to the core before it spills. Press Space to ignite early for bonus points.</p>
+<button id="go">Start run</button></div>
+<script>
+const FS=`precision highp float;uniform vec2 R;uniform float T,P;uniform vec2 M;
+float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float n(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h(i),h(i+vec2(1,0)),f.x),mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x),f.y);}
+float fbm(vec2 p){float v=0.,a=.5;for(int i=0;i<5;i++){v+=a*n(p);p=p*2.03+vec2(1.7,9.2);a*=.5;}return v;}
+void main(){vec2 uv=(gl_FragCoord.xy-.5*R)/R.y;uv+=M*.04;
+vec2 q=uv*1.7+vec2(T*.015,0.);
+float w=fbm(q+fbm(q*1.4+T*.03)*1.9);
+float w2=fbm(q*2.1+w*2.2-T*.035);
+vec3 c=vec3(.015,.01,.05);
+c+=vec3(.08,.22,.55)*pow(w,2.)*2.3;
+c+=vec3(.6,.07,.5)*pow(w2,3.)*2.1;
+c+=vec3(0.,.55,.65)*smoothstep(.5,.95,w*w2*2.2)*.7;
+for(int l=0;l<3;l++){float s=14.+float(l)*24.;vec2 g=(uv+M*.012*float(l+1)+vec2(T*.004*float(l+1),0.))*s;vec2 id=floor(g);float r=h(id+float(l)*7.);vec2 f=fract(g)-.5+(vec2(h(id+3.),h(id+9.))-.5)*.5;float d=length(f);float tw=.6+.4*sin(T*(1.+r*3.)+r*40.);c+=step(.93,r)*(1.-smoothstep(0.,.13,d))*tw*vec3(.8,.9,1.);}
+c+=P*vec3(.12,.2,.35)*exp(-length(uv)*2.2);
+c*=1.-.6*dot(uv,uv);
+gl_FragColor=vec4(pow(c,vec3(.92)),1.);}`;
+const $=id=>document.getElementById(id),bg=$('bg'),fg=$('fg'),gl=bg.getContext('webgl'),x=fg.getContext('2d');
+const D=[[0,-1],[1,0],[0,1],[-1,0]],rot=m=>((m<<1)|(m>>3))&15,rnd=n=>Math.random()*n|0;
+let W,H,DPR,N,s,gx,gy,grid,r0,r1,lv=1,score=0,lives=3,streak=0,state='menu',grace=0,gmax=1,tt=1,fl={},shake=0,msg='',msgT=0,P=0,time=0,mx=0,my=0,hov=null,parts=[],timers=[];
+// WebGL nebula
+const sh=(t,src)=>{const o=gl.createShader(t);gl.shaderSource(o,src);gl.compileShader(o);return o},pg=gl.createProgram();
+gl.attachShader(pg,sh(gl.VERTEX_SHADER,'attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}'));gl.attachShader(pg,sh(gl.FRAGMENT_SHADER,FS));gl.linkProgram(pg);gl.useProgram(pg);
+gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+const lp=gl.getAttribLocation(pg,'p');gl.enableVertexAttribArray(lp);gl.vertexAttribPointer(lp,2,gl.FLOAT,false,0,0);
+const uR=gl.getUniformLocation(pg,'R'),uT=gl.getUniformLocation(pg,'T'),uM=gl.getUniformLocation(pg,'M'),uP=gl.getUniformLocation(pg,'P');
+function rs(){DPR=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;fg.width=W*DPR;fg.height=H*DPR;const b=Math.min(DPR,1.5);bg.width=W*b;bg.height=H*b;gl.viewport(0,0,bg.width,bg.height);if(grid)layout()}
+addEventListener('resize',rs);
+// audio
+let ac;function snd(f,d=.09,ty='sine',v=.05){try{ac=ac||new AudioContext();const o=ac.createOscillator(),g=ac.createGain(),t=ac.currentTime;o.type=ty;o.frequency.value=f;g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(.0001,t+d);o.connect(g);g.connect(ac.destination);o.start();o.stop(t+d)}catch(e){}}
+// level generation
+function dirOf(cx,cy,q){return D.findIndex(d=>d[0]==q[0]-cx&&d[1]==q[1]-cy)}
+function mkPath(N,a,b){const seen=new Set(),p=[];
+ (function go(cx,cy){p.push([cx,cy]);seen.add(cx+cy*N);
+  if(cx==N-1&&cy==b)return p.length>=N;
+  for(const d of [0,1,2,3].sort(()=>Math.random()-.5)){const nx=cx+D[d][0],ny=cy+D[d][1];if(nx<0||ny<0||nx>=N||ny>=N||seen.has(nx+ny*N))continue;if(go(nx,ny))return true}
+  p.pop();seen.delete(cx+cy*N);return false})(0,a);return p}
+function layout(){s=Math.max(30,Math.min((W-170)/(N+2),(H-250)/N,118));gx=(W-N*s)/2;gy=(H-N*s)/2+34}
+function build(){
+ N=Math.min(4+Math.ceil(lv/2),8);r0=rnd(N);r1=rnd(N);const p=mkPath(N,r0,r1);
+ grid=[];for(let j=0;j<N;j++){grid.push([]);for(let i=0;i<N;i++)grid[j].push({i,j,m:[5,10,3,6,12,9,3,6,12][rnd(9)],off:0,lock:0,fill:0,ent:0,ex:0})}
+ p.forEach(([cx,cy],i)=>{const pv=i?p[i-1]:null,nx=i<p.length-1?p[i+1]:null;grid[cy][cx].m=(pv?1<<dirOf(cx,cy,pv):8)|(nx?1<<dirOf(cx,cy,nx):2)});
+ grid.flat().forEach(t=>{for(let k=rnd(4);k--;)t.m=rot(t.m)});
+ gmax=grace=Math.max(4,11.5-lv*.8);tt=Math.max(.3,1-lv*.07);fl={on:0,dead:0,done:0};layout()}
+const after=(t,f)=>timers.push([t,f]),mult=()=>1+Math.min(streak,6)*.25;
+function burst(px,py,n,cols,sp=190){for(let k=0;k<n;k++){const a=Math.random()*6.283,v=sp*(.15+Math.random());parts.push({x:px,y:py,vx:Math.cos(a)*v,vy:Math.sin(a)*v,l:.5+Math.random()*.8,m:1.3,c:cols[rnd(cols.length)],z:1+Math.random()*2.6})}}
+const tc=t=>[gx+t.i*s+s/2,gy+t.j*s+s/2];
+// flow logic
+function ignite(){if(state!='play'||fl.on||fl.dead)return;fl.on=1;enter(0,r0,3)}
+function enter(i,j,e){const t=grid[j][i];fl.t=t;if(t.lock)return leak(t,e);t.lock=1;t.ent=e;
+ const r=t.m&~(1<<e);if(!(t.m>>e&1)||!r||r&(r-1))return leak(t,e);t.ex=31-Math.clz32(r);t.fill=.0001}
+function leak(t,e){fl.dead=1;lives--;streak=0;shake=26;const[px,py]=tc(t);burst(px+D[e][0]*s/2,py+D[e][1]*s/2,70,['#ff4fd8','#ff7a3c','#ffd36b']);
+ snd(90,.5,'sawtooth',.08);msg='Containment breach';msgT=2;after(1.5,()=>{if(lives<=0)over();else build()})}
+function win(){fl.done=1;const tot=Math.round(100*lv*mult()+grace*30);score+=tot;streak++;
+ burst(gx+N*s+s*.55,gy+r1*s+s/2,160,['#5ef2ff','#ffd36b','#ff4fd8','#fff'],300);
+ [523,659,784,1047].forEach((f,k)=>setTimeout(()=>snd(f,.35,'triangle',.06),k*90));
+ msg='Sector '+lv+' cleared  +'+tot;msgT=2;after(1.9,()=>{lv++;build()})}
+function over(){state='over';$('tx').textContent='Final score '+score+' after reaching sector '+lv+'. The nebula is waiting.';$('go').textContent='Run it back';$('ov').classList.remove('h')}
+function start(){lv=1;score=0;lives=3;streak=0;state='play';build();$('ov').classList.add('h');snd(440,.2,'triangle')}
+$('go').onclick=start;
+addEventListener('keydown',e=>{if(e.code=='Space'){e.preventDefault();if(state=='play'&&!fl.on&&!fl.dead){score+=Math.round(grace*40);msg='Early ignition  +'+Math.round(grace*40);msgT=1.2;ignite()}}else if(e.code=='Enter'&&state!='play')start()});
+const pick=e=>{const i=Math.floor((e.clientX-gx)/s),j=Math.floor((e.clientY-gy)/s);return grid&&i>=0&&j>=0&&i<N&&j<N?grid[j][i]:null};
+fg.onpointermove=e=>{mx=e.clientX/W-.5;my=.5-e.clientY/H;hov=pick(e)};
+fg.onpointerdown=e=>{if(state!='play'||fl.dead)return;const t=pick(e);if(t&&!t.lock){t.m=rot(t.m);t.off=-Math.PI/2;const[px,py]=tc(t);burst(px,py,10,['#5ef2ff','#fff'],110);snd(360+rnd(6)*55,.08,'triangle')}};
+// update
+function update(dt){
+ timers=timers.filter(a=>(a[0]-=dt)>0||(a[1](),0));
+ if(state=='play'&&!fl.on&&!fl.dead){grace-=dt;if(grace<=0)ignite()}
+ if(fl.on&&!fl.dead&&!fl.done&&fl.t.fill>0){const t=fl.t;t.fill+=dt/tt;const[px,py]=tc(t),E=D[t.ent],X=D[t.ex],f=Math.min(t.fill,1),hx=f<.5?E[0]*(1-f*2):X[0]*(f-.5)*2,hy=f<.5?E[1]*(1-f*2):X[1]*(f-.5)*2;
+  if(Math.random()<.9)parts.push({x:px+hx*s/2,y:py+hy*s/2,vx:(Math.random()-.5)*70,vy:(Math.random()-.5)*70,l:.5,m:.5,c:Math.random()<.5?'#ff4fd8':'#ffd36b',z:1+Math.random()*2});
+  if(t.fill>=1){t.fill=1;score+=Math.round(10*mult());snd(220+fl.n*0,.06,'square',.02);const nx=t.i+X[0],ny=t.j+X[1];
+   if(nx==N&&t.j==r1&&t.ex==1)win();else if(nx<0||ny<0||nx>=N||ny>=N)leak(t,t.ex);else enter(nx,ny,(t.ex+2)%4)}}
+ if(grid)for(const t of grid.flat())t.off*=Math.pow(.0005,dt);
+ parts=parts.filter(p=>(p.l-=dt)>0);for(const p of parts){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.97;p.vy*=.97}
+ shake*=Math.pow(.01,dt);msgT-=dt;P+=((fl.on?1:0)-P)*dt*2;
+ $('sc').textContent=score;$('lv').textContent=lv;$('hp').textContent='◆'.repeat(Math.max(lives,0))+'◇'.repeat(Math.max(3-lives,0))}
+// draw
+const rr=(a,b,w,h,r)=>{x.beginPath();x.roundRect(a,b,w,h,r)};
+function pipe(m,c){x.beginPath();for(let d=0;d<4;d++)if(m>>d&1){x.moveTo(0,0);x.lineTo(D[d][0]*c,D[d][1]*c)}}
+function drawTile(t){
+ const[px,py]=tc(t),c=s/2,hv=hov===t&&!t.lock&&state=='play';
+ x.save();x.translate(px,py);rr(-c+4,-c+4,s-8,s-8,s*.14);
+ const g=x.createLinearGradient(-c,-c,c,c);g.addColorStop(0,hv?'rgba(94,242,255,.3)':'rgba(70,90,200,.2)');g.addColorStop(1,'rgba(130,40,170,.16)');
+ x.fillStyle=g;x.fill();x.lineWidth=1.5;x.strokeStyle=hv?'rgba(94,242,255,.85)':'rgba(140,170,255,.22)';x.stroke();
+ x.save();x.rotate(t.off);x.lineCap='round';pipe(t.m,c);x.lineWidth=s*.2;x.strokeStyle='rgba(6,10,36,.92)';x.stroke();
+ x.lineWidth=s*.085;x.strokeStyle=t.lock?'rgba(150,160,210,.38)':'#5ef2ff';x.shadowColor='#5ef2ff';x.shadowBlur=t.lock?0:11;x.stroke();x.restore();
+ if(t.fill>0){const E=D[t.ent],X=D[t.ex],f=Math.min(t.fill,1);x.beginPath();x.moveTo(E[0]*c,E[1]*c);
+  if(f<=.5)x.lineTo(E[0]*c*(1-f*2),E[1]*c*(1-f*2));else{x.lineTo(0,0);const q=(f-.5)*2;x.lineTo(X[0]*c*q,X[1]*c*q)}
+  x.lineCap=x.lineJoin='round';x.lineWidth=s*.14;x.strokeStyle='#ff4fd8';x.shadowColor='#ff4fd8';x.shadowBlur=24;x.stroke();
+  x.lineWidth=s*.05;x.strokeStyle='#fff3c4';x.shadowColor='#ffd36b';x.shadowBlur=8;x.stroke()}
+ x.restore()}
+function orb(px,py,r,col,k){const g=x.createRadialGradient(px,py,0,px,py,r*3);g.addColorStop(0,col);g.addColorStop(.25,col+'88');g.addColorStop(1,col+'00');x.fillStyle=g;x.beginPath();x.arc(px,py,r*3*k,0,7);x.fill()}
+function draw(){
+ x.setTransform(DPR,0,0,DPR,0,0);x.clearRect(0,0,W,H);if(!grid)return;
+ x.save();if(shake>.2)x.translate((Math.random()-.5)*shake,(Math.random()-.5)*shake);
+ const pu=1+.12*Math.sin(time*4),sy=gy+r0*s+s/2,cy=gy+r1*s+s/2,cx=gx+N*s+s*.55,sx=gx-s*.55;
+ x.lineCap='round';x.beginPath();x.moveTo(sx,sy);x.lineTo(gx+4,sy);x.lineWidth=s*.085;x.strokeStyle=fl.on?'#ff4fd8':'#5ef2ff';x.shadowColor=x.strokeStyle;x.shadowBlur=14;x.stroke();
+ x.beginPath();x.moveTo(gx+N*s-4,cy);x.lineTo(cx,cy);x.strokeStyle=fl.done?'#ffd36b':'rgba(94,242,255,.5)';x.stroke();x.shadowBlur=0;
+ orb(sx,sy,s*.17,fl.on?'#ff4fd8':'#5ef2ff',pu);x.fillStyle='#fff';x.beginPath();x.arc(sx,sy,s*.1,0,7);x.fill();
+ const cc=fl.done?'#ffd36b':'#5ef2ff';orb(cx,cy,s*.2,cc,fl.done?1.6:pu);
+ x.strokeStyle=cc;x.lineWidth=2.5;x.shadowColor=cc;x.shadowBlur=14;for(let k=0;k<3;k++){x.setLineDash([s*.2,s*.12]);x.lineDashOffset=time*30*(k%2?1:-1);x.beginPath();x.arc(cx,cy,s*(.16+k*.07),0,7);x.stroke()}x.setLineDash([]);x.shadowBlur=0;
+ grid.flat().forEach(drawTile);
+ x.globalCompositeOperation='lighter';for(const p of parts){x.globalAlpha=Math.max(p.l/p.m,0);x.fillStyle=p.c;x.shadowColor=p.c;x.shadowBlur=10;x.beginPath();x.arc(p.x,p.y,p.z,0,7);x.fill()}
+ x.restore();x.globalAlpha=1;x.shadowBlur=0;x.globalCompositeOperation='source-over';
+ x.textAlign='center';x.font='600 13px "SF Mono",ui-monospace,monospace';
+ if(state=='play'){const bw=N*s,by=gy-30;
+  if(!fl.on&&!fl.dead){x.fillStyle='rgba(120,160,255,.18)';rr(gx,by,bw,6,3);x.fill();const f=grace/gmax;x.fillStyle=f<.3?'#ff4fd8':'#5ef2ff';x.shadowColor=x.fillStyle;x.shadowBlur=14;rr(gx,by,bw*f,6,3);x.fill();x.shadowBlur=0;
+   x.fillStyle='#9fd8ff';x.fillText('Plasma ignites in '+grace.toFixed(1)+'s   ·   Space ignites early',W/2,by-12)}
+  else if(!fl.dead&&!fl.done){x.fillStyle='#ff9ae8';x.fillText('Plasma flowing. Locked tiles can’t turn.',W/2,by-12)}
+  if(streak>0){x.fillStyle='#ffd36b';x.fillText('Streak x'+mult().toFixed(2),W/2,gy+N*s+30)}}
+ if(msgT>0){x.globalAlpha=Math.min(msgT,1);x.font='700 26px -apple-system,sans-serif';x.fillStyle='#fff';x.shadowColor=fl.dead?'#ff4fd8':'#ffd36b';x.shadowBlur=24;x.fillText(msg,W/2,gy+N*s+74);x.shadowBlur=0;x.globalAlpha=1}}
+// loop
+let last=performance.now();
+function frame(ts){const dt=Math.min((ts-last)/1000,.05);last=ts;time+=dt;update(dt);draw();
+ gl.uniform2f(uR,bg.width,bg.height);gl.uniform1f(uT,time);gl.uniform2f(uM,mx,my);gl.uniform1f(uP,P);gl.drawArrays(gl.TRIANGLES,0,3);requestAnimationFrame(frame)}
+rs();requestAnimationFrame(frame);
+</script></body></html>
